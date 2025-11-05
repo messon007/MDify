@@ -104,7 +104,7 @@ MDify utilizes several open-source resources:
 We're grateful to the creators of these projects.
 
 ## License
-Licensed under [MIT License](LICENSE).
+Licensed under [GPL-3.0 license](LICENSE).
 
 ## Contributing
 Contributions welcome! Please follow these steps:
