@@ -256,30 +256,26 @@
                     <summary>⚙️ AI Settings</summary>
                     <div class="panel">
                         <div class="form-group">
-                            <label>Provider:
-                                <select id="aiProvider">
-                                    <option value="pollinations" selected>Pollinations.ai</option>
-                                    <option value="openai">OpenAI</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div class="form-group">
-                            <label>Endpoint:
-                                <input type="text" id="apiEndpoint" value="https://text.pollinations.ai/openai">
+                            <label>API Endpoint:
+                                <input type="text" id="apiEndpoint" value="http://localhost:8082" placeholder="http://localhost:8082">
+                                <p class="note">Using local CORS proxy (localhost:8082) that forwards to api-hub.inner.chj.cloud</p>
                             </label>
                         </div>
                         <div class="form-group">
                             <label>API Key:
-                                <input type="password" id="apiKey">
-                                <p class="note">Note: Your API key is stored locally in your browser and never sent to external servers. You are responsible for the security of your browser settings.</p>
+                                <input type="password" id="apiKey" placeholder="sk-...">
+                                <p class="note">Your API key is stored locally in your browser and never sent to external servers. You are responsible for the security of your browser settings.</p>
                             </label>
                         </div>
                         <div class="form-group">
                             <label>Model:
-                                <select id="aiModel"></select>
+                                <select id="aiModel">
+                                    <option value="kivy-glm-4_7" selected>kivy-glm-4_7</option>
+                                </select>
+                                <p class="note">Default model is kivy-glm-4_7. Click "Load Models" to fetch additional models from your API.</p>
                             </label>
                         </div>
-                        <button id="loadModelsBtn">Load Models</button>
+                        <button id="loadModelsBtn">Load Models (Optional)</button>
                     </div>
                 </details>
 

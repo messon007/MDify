@@ -5,6 +5,32 @@ document.getElementById('dialog-version').textContent = appVersion;
 let currentFileHandle = null;
 let skipAutosaveLoad = false;
 let currentDraftId = null;
+let autosaveStorageWarningShown = false;
+let lastSavedContent = '';
+
+const MAX_LOCAL_STORAGE_DRAFT_KB = 4000;
+const LARGE_DOCUMENT_CHAR_LIMIT = 300000;
+const LARGE_DOCUMENT_LINE_LIMIT = 10000;
+const LARGE_DOCUMENT_PREVIEW_CONTEXT_LINES = 220;
+
+function estimateLocalStorageSizeWith(key, value) {
+  const snapshot = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const storageKey = localStorage.key(i);
+    snapshot[storageKey] = localStorage.getItem(storageKey);
+  }
+  snapshot[key] = value;
+  return Math.round((JSON.stringify(snapshot).length / 1024) * 100) / 100;
+}
+
+function isQuotaExceededError(err) {
+  return err && (
+    err.name === 'QuotaExceededError' ||
+    err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    err.code === 22 ||
+    err.code === 1014
+  );
+}
 
 // Autosave Collection Functions
 function loadAutosaveCollection() {
@@ -13,7 +39,12 @@ function loadAutosaveCollection() {
 }
 
 function saveAutosaveCollection(collection) {
-  localStorage.setItem('autosaveCollection', JSON.stringify(collection));
+  const collectionJSON = JSON.stringify(collection);
+  const estimatedSize = estimateLocalStorageSizeWith('autosaveCollection', collectionJSON);
+  if (estimatedSize > MAX_LOCAL_STORAGE_DRAFT_KB) {
+    throw new Error(`Document is too large for browser autosave (${estimatedSize} KB). Please save it as a file instead.`);
+  }
+  localStorage.setItem('autosaveCollection', collectionJSON);
 }
 
 function addOrUpdateDraft(id, name, content) {
@@ -193,7 +224,7 @@ function testLog(log) {
 const detectAndSetLanguage = debounce(() => {
   const editorContentElem = document.querySelector('.toastui-editor [contenteditable="true"]');
   // Get the first 50 characters to make detection fast
-  const sampleText = editor.getMarkdown().substring(0, 50);
+  const sampleText = getDocumentMarkdown().substring(0, 50);
   if (!sampleText) return;
   if(sampleText.trim() != languageDetectionString.trim()) {
     // console.log("---------> Checking Language...");
@@ -290,6 +321,209 @@ const editor = new Editor({
     //   }
     // },
 });
+
+let largeDocumentMode = false;
+const largeDocumentTextarea = document.createElement('textarea');
+const largeDocumentPreview = document.getElementById('preview');
+largeDocumentTextarea.id = 'largeDocumentEditor';
+largeDocumentTextarea.setAttribute('aria-label', 'Large markdown editor');
+largeDocumentTextarea.spellcheck = false;
+largeDocumentTextarea.style.cssText = 'display:none;width:50%;height:100%;box-sizing:border-box;border:0;border-right:1px solid var(--border-color);resize:none;padding:16px;font:14px/1.6 monospace;background:var(--bg-color);color:var(--text-color);outline:none;order:1;';
+largeDocumentPreview.style.cssText = 'display:none;width:50%;height:100%;box-sizing:border-box;overflow:auto;padding:16px;background:var(--bg-color);color:var(--text-color);font-family:var(--font-body);line-height:1.6;';
+largeDocumentPreview.style.order = '2';
+document.querySelector('.editor-container').insertBefore(largeDocumentTextarea, largeDocumentPreview);
+
+const updateLargeDocumentPreview = debounce(() => {
+  if (!largeDocumentMode) return;
+  const content = getLargeDocumentPreviewSlice();
+  largeDocumentPreview.innerHTML = lightweightMarkdownToHtml(content);
+}, 250);
+
+largeDocumentTextarea.addEventListener('input', () => {
+  autoSaveOnChangeFunc();
+  updateLargeDocumentPreview();
+});
+largeDocumentTextarea.addEventListener('keyup', updateLargeDocumentPreview);
+largeDocumentTextarea.addEventListener('click', updateLargeDocumentPreview);
+largeDocumentTextarea.addEventListener('scroll', updateLargeDocumentPreview);
+
+function shouldUseLargeDocumentMode(content) {
+  return content.length > LARGE_DOCUMENT_CHAR_LIMIT ||
+    (content.match(/\n/g) || []).length > LARGE_DOCUMENT_LINE_LIMIT;
+}
+
+function setLargeDocumentMode(enabled) {
+  largeDocumentMode = enabled;
+  document.getElementById('editor').style.display = enabled ? 'none' : '';
+  largeDocumentTextarea.style.display = enabled ? 'block' : 'none';
+  largeDocumentPreview.style.display = enabled ? 'block' : 'none';
+  document.getElementById('footerButtons').style.display = enabled ? 'none' : '';
+}
+
+function getDocumentMarkdown() {
+  return largeDocumentMode ? largeDocumentTextarea.value : editor.getMarkdown();
+}
+
+function setDocumentMarkdown(content, options = {}) {
+  if (options.forceLarge || shouldUseLargeDocumentMode(content)) {
+    setLargeDocumentMode(true);
+    largeDocumentTextarea.value = content;
+    updateLargeDocumentPreview();
+    return true;
+  } else {
+    setLargeDocumentMode(false);
+    editor.setMarkdown(content);
+    return false;
+  }
+}
+
+function getDocumentHTML() {
+  return largeDocumentMode ? lightweightMarkdownToHtml(getDocumentMarkdown()) : editor.getHTML();
+}
+
+function getLargeDocumentPreviewSlice() {
+  const content = largeDocumentTextarea.value;
+  const cursor = largeDocumentTextarea.selectionStart || 0;
+  const beforeCursor = content.slice(0, cursor);
+  const cursorLine = beforeCursor.split('\n').length - 1;
+  const lines = content.split('\n');
+  const halfWindow = Math.floor(LARGE_DOCUMENT_PREVIEW_CONTEXT_LINES / 2);
+  let start = Math.max(0, cursorLine - halfWindow);
+  let end = Math.min(lines.length, start + LARGE_DOCUMENT_PREVIEW_CONTEXT_LINES);
+  start = Math.max(0, end - LARGE_DOCUMENT_PREVIEW_CONTEXT_LINES);
+
+  for (let i = cursorLine; i >= start; i--) {
+    if (/^#{1,6}\s+/.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+
+  return lines.slice(start, end).join('\n');
+}
+
+function escapeHTML(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function renderInlineMarkdown(value) {
+  return escapeHTML(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+function lightweightMarkdownToHtml(markdown) {
+  const lines = markdown.split('\n');
+  const html = [];
+  let inCodeBlock = false;
+  let codeLines = [];
+  let inList = false;
+  let inTable = false;
+
+  function closeList() {
+    if (inList) {
+      html.push('</ul>');
+      inList = false;
+    }
+  }
+
+  function closeTable() {
+    if (inTable) {
+      html.push('</tbody></table>');
+      inTable = false;
+    }
+  }
+
+  function renderTableRow(line, tag) {
+    const cells = line.trim().replace(/^\||\|$/g, '').split('|');
+    return '<tr>' + cells.map(cell => `<${tag}>${renderInlineMarkdown(cell.trim())}</${tag}>`).join('') + '</tr>';
+  }
+
+  for (const line of lines) {
+    if (line.startsWith('```')) {
+      if (inCodeBlock) {
+        html.push(`<pre><code>${escapeHTML(codeLines.join('\n'))}</code></pre>`);
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        closeList();
+        closeTable();
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      closeList();
+      closeTable();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      closeTable();
+      const level = heading[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line)) {
+      closeTable();
+      if (!inList) {
+        html.push('<ul>');
+        inList = true;
+      }
+      html.push(`<li>${renderInlineMarkdown(line.replace(/^\s*[-*+]\s+/, ''))}</li>`);
+      continue;
+    }
+
+    if (/^\s*\|.+\|\s*$/.test(line)) {
+      closeList();
+      if (/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)) {
+        continue;
+      }
+      if (!inTable) {
+        html.push('<table><tbody>');
+        inTable = true;
+        html.push(renderTableRow(line, 'th'));
+      } else {
+        html.push(renderTableRow(line, 'td'));
+      }
+      continue;
+    }
+
+    closeList();
+    closeTable();
+
+    if (/^---+$/.test(line.trim())) {
+      html.push('<hr>');
+    } else if (/^\s*>/.test(line)) {
+      html.push(`<blockquote>${renderInlineMarkdown(line.replace(/^\s*>\s?/, ''))}</blockquote>`);
+    } else {
+      html.push(`<p>${renderInlineMarkdown(line)}</p>`);
+    }
+  }
+
+  if (inCodeBlock) {
+    html.push(`<pre><code>${escapeHTML(codeLines.join('\n'))}</code></pre>`);
+  }
+  closeList();
+  closeTable();
+  return html.join('\n');
+}
 
 editor.addCommand("markdown", "pageBreak", function additem() {
   // editor.replaceSelection("\n\n~~-~~ ~~-~~ ~~-~~\n\n");
@@ -460,15 +694,15 @@ if ('launchQueue' in window) {
     const file = await fileHandle.getFile();
     const contents = await file.text();    
 
-    editor.setMarkdown(contents); // or your editor loading method
+    setDocumentMarkdown(contents); // or your editor loading method
     currentFileHandle = fileHandle; // 🔹 Save the handle so you can save it later
     
     localStorage.removeItem('autosave');
     setFileNameValue(file.name);
+    lastSavedContent = contents;
   });
 }
 
-let lastSavedContent = '';
 async function saveFile() {
   try {
     if (!currentFileHandle) {
@@ -493,10 +727,10 @@ async function saveFile() {
     }
 
     const writable = await currentFileHandle.createWritable();
-    await writable.write(editor.getMarkdown());
+    await writable.write(getDocumentMarkdown());
     await writable.close();
     showAlert('File saved successfully');
-    lastSavedContent = editor.getMarkdown();
+    lastSavedContent = getDocumentMarkdown();
     localStorage.removeItem('autosave');
   } catch (err) {
     showAlert(`Save failed: ${err.message}`);
@@ -519,7 +753,7 @@ async function saveAsNewFile() {
     });
 
     const writable = await handle.createWritable();
-    await writable.write(editor.getMarkdown());
+    await writable.write(getDocumentMarkdown());
     await writable.close();
     currentFileHandle = handle;
 
@@ -538,7 +772,7 @@ async function saveAsNewFile() {
       showAlert('File saved successfully');
     }
     
-    lastSavedContent = editor.getMarkdown();
+    lastSavedContent = getDocumentMarkdown();
     localStorage.removeItem('autosave');
   } catch (err) {
     if (err.name !== 'AbortError') {
@@ -548,36 +782,67 @@ async function saveAsNewFile() {
 }
 
 document.getElementById('openMd').addEventListener('click', async () => {
-  if (editor.getMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
+  if (getDocumentMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
 
   try {
-    // Show native file picker
-    skipAutosaveLoad = true; // prevent replacing with autosave
-    const [handle] = await window.showOpenFilePicker({
-      types: [{
-        description: 'Markdown Files',
-        accept: { 
-          'text/markdown': ['.md'],
-          'text/plain': ['.txt'],
-        }
-      }],
-      excludeAcceptAllOption: true,
-      multiple: false
-    });
+    // Check if File System Access API is supported
+    if (window.showOpenFilePicker) {
+      // Show native file picker
+      skipAutosaveLoad = true; // prevent replacing with autosave
+      const [handle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Markdown Files',
+          accept: {
+            'text/markdown': ['.md'],
+            'text/plain': ['.txt'],
+          }
+        }],
+        excludeAcceptAllOption: true,
+        multiple: false
+      });
 
-    const file = await handle.getFile();
-    const content = await file.text();
-    editor.setMarkdown(content);
-    currentFileHandle = handle;
-    showAlert(`Opened: ${file.name}`);
-    localStorage.removeItem('autosave');
-    unselectDraftItem();
-    // document.title = "MDify | " + file.name.toUpperCase();
-    
-    setFileNameValue(file.name);
-    setTimeout(async () => {
-      await saveFile();
-    }, 3000);
+      const file = await handle.getFile();
+      const content = await file.text();
+      const loadedInLargeMode = setDocumentMarkdown(content);
+      currentFileHandle = handle;
+      showAlert(loadedInLargeMode
+        ? `Opened: ${file.name} in Large Document Mode`
+        : `Opened: ${file.name}`);
+      localStorage.removeItem('autosave');
+      unselectDraftItem();
+      // document.title = "MDify | " + file.name.toUpperCase();
+
+      setFileNameValue(file.name);
+      lastSavedContent = content;
+    } else {
+      // Fallback: Use traditional file input for browsers without File System Access API
+      skipAutosaveLoad = true;
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.md,.txt';
+
+      input.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        try {
+          const content = await file.text();
+          const loadedInLargeMode = setDocumentMarkdown(content);
+          currentFileHandle = null; // Can't save directly to file with traditional input
+          showAlert(loadedInLargeMode
+            ? `Opened: ${file.name} in Large Document Mode (Use "Save As" to save changes)`
+            : `Opened: ${file.name} (Note: Use "Save As" to save changes)`);
+          localStorage.removeItem('autosave');
+          unselectDraftItem();
+          setFileNameValue(file.name);
+          lastSavedContent = content;
+        } catch (err) {
+          showAlert(`Failed to read file: ${err.message}`);
+        }
+      });
+
+      input.click();
+    }
   } catch (err) {
     if (err.name !== 'AbortError') {
       console.error(err);
@@ -589,7 +854,7 @@ document.getElementById('openMd').addEventListener('click', async () => {
 let importAndAppend = false;
 // Handle file imports
 document.getElementById('importMd').addEventListener('click', () => {
-  if (editor.getMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
+  if (getDocumentMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
   importAndAppend = false;
   document.getElementById('fileInput').click();
 });
@@ -606,12 +871,21 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   try {
     const content = await file.text();
     if (importAndAppend) {
-      editor.setMarkdown(editor.getMarkdown() + '\n' + content);
+      const loadedInLargeMode = setDocumentMarkdown(getDocumentMarkdown() + '\n' + content);
+      if (loadedInLargeMode) {
+        showAlert(`Imported: ${file.name} in Large Document Mode`);
+      }
     } else {
-      editor.setMarkdown(content);
+      const loadedInLargeMode = setDocumentMarkdown(content);
+      lastSavedContent = content;
+      if (loadedInLargeMode) {
+        showAlert(`Imported: ${file.name} in Large Document Mode`);
+      }
     }
 
-    showAlert(`Imported: ${file.name}`);
+    if (!largeDocumentMode) {
+      showAlert(`Imported: ${file.name}`);
+    }
     document.getElementById('fileInput').value = '';
   } catch (err) {
     showAlert(`Import failed: ${err.message}`);
@@ -620,10 +894,10 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
 
 // New file confirmation
 document.getElementById('newMd').addEventListener('click', () => {
-  if (editor.getMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
+  if (getDocumentMarkdown().trim() && !confirm('Unsaved changes will be lost. Continue?')) return;
   document.getElementById('fileInput').value = '';
   currentFileHandle = null;
-  editor.setMarkdown('');
+  setDocumentMarkdown('');
   fileNameInput.value = "Untitled Document " + Date.now();
   localStorage.removeItem('autosave');
   sessionStorage.clear();
@@ -640,7 +914,7 @@ document.getElementById('saveAsBtn').addEventListener('click', saveAsNewFile);
 
 // Export handlers
 document.getElementById('exportMd').addEventListener('click', () => {
-  const content = editor.getMarkdown();
+  const content = getDocumentMarkdown();
   const blob = new Blob([content], {
     type: 'text/markdown'
   });
@@ -649,7 +923,7 @@ document.getElementById('exportMd').addEventListener('click', () => {
 
 document.getElementById('exportHtml').addEventListener('click', async () => {
   try {
-    const content = editor.getHTML();
+    const content = getDocumentHTML();
     const suggestedName = extractSafeFilenameFromContent('html');
 
     const html = `
@@ -716,7 +990,7 @@ document.getElementById('exportHtml').addEventListener('click', async () => {
 
 document.getElementById('exportStyledHtml').addEventListener('click', async () => {
   try {
-    const content = editor.getHTML();
+    const content = getDocumentHTML();
     const suggestedName = extractSafeFilenameFromContent('html');
     const prismCSS = await loadFile("./libs/prism.min.css");
     const tuiEditorViewer = await loadFile("./libs/toastui-editor-viewer-export.min.css");
@@ -831,7 +1105,11 @@ async function autoSaveFunc() {
   }
   try {
     changeSaveIconBtnIcon('loading');
-    const content = editor.getMarkdown();
+    const content = getDocumentMarkdown();
+    if (content === lastSavedContent) {
+      changeSaveIconBtnIcon('saved');
+      return;
+    }
     
     // If we have a file handle, save to file
     if (currentFileHandle) {
@@ -847,15 +1125,26 @@ async function autoSaveFunc() {
           currentDraftId = `draft-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
         }
         addOrUpdateDraft(currentDraftId, name, content);
+        autosaveStorageWarningShown = false;
       }
     }
     
-    lastSavedContent = editor.getMarkdown();
+    lastSavedContent = getDocumentMarkdown();
     setTimeout(() => {
       changeSaveIconBtnIcon('saved');
     }, 1000);
   } catch (err) {
-    showAlert(`Autosave failed: ${err.message}`);
+    const errorMessage = err && err.message ? err.message : '';
+    if (isQuotaExceededError(err) || errorMessage.includes('too large for browser autosave')) {
+      if (!autosaveStorageWarningShown) {
+        showAlert(errorMessage.includes('too large for browser autosave')
+          ? errorMessage
+          : 'Document is too large for browser autosave. Please save it as a file instead.');
+        autosaveStorageWarningShown = true;
+      }
+    } else {
+      showAlert(`Autosave failed: ${errorMessage || 'Unknown error'}`);
+    }
     changeSaveIconBtnIcon('disable');
   }
 }
@@ -877,8 +1166,13 @@ window.addEventListener('DOMContentLoaded', () => {
         const fileHandle = launchParams.files[0];
         const file = await fileHandle.getFile();
         const content = await file.text();
-        editor.setMarkdown(content);
-        showAlert(`Opened file: ${file.name}`);
+        const loadedInLargeMode = setDocumentMarkdown(content);
+        currentFileHandle = fileHandle;
+        setFileNameValue(file.name);
+        lastSavedContent = content;
+        showAlert(loadedInLargeMode
+          ? `Opened file: ${file.name} in Large Document Mode`
+          : `Opened file: ${file.name}`);
       } catch (error) {
         showAlert(`Error opening file: ${error.message}`);
       }
@@ -896,7 +1190,7 @@ window.addEventListener('DOMContentLoaded', () => {
   const emergencySave = localStorage.getItem('emergency_save');
   if (emergencySave) {
     if (confirm("We found unsaved work from your last session. Restore it?")) {
-      editor.setMarkdown(emergencySave);
+      setDocumentMarkdown(emergencySave);
       // lastSavedContent = emergencySave; // Or prompt them to save it manually
     }
     localStorage.removeItem('emergency_save');
@@ -994,7 +1288,7 @@ function extractSafeFilenameFromContent(type = 'md') {
   if (fileNameInputValue && fileNameInputValue !== "Untitled Document") {
     clean = sanitize(fileNameInputValue);
   } else {
-    const content = editor.getMarkdown().trim();
+    const content = getDocumentMarkdown().trim();
     const firstLine = content.split('\n').find(line => line.trim().length > 0) || 'Untitled Document';
     clean = sanitize(firstLine);
   }
@@ -1161,153 +1455,15 @@ customInstructionsToggle.addEventListener('change', () => {
 const preDefinedRoles = [
   {
     id: 1,
-    role: "Writer",
-    prompt: 
-`You are a versatile and highly skilled writer and editor with a master's command of language. Your expertise spans multiple forms, including fiction, non-fiction, technical writing, and marketing copy.
-**Core Philosophy:** Your primary goal is clarity, engagement, and adapting your tone and style to fit the user's specific request and intended audience. You value well-structured narratives and persuasive, clean prose.
-**Capabilities:** You can brainstorm ideas, create detailed outlines, draft content, edit for grammar and style, and rewrite existing text to improve its impact.
-**Interaction Style:** You are a creative and collaborative partner. You are ready to receive specific instructions and will ask clarifying questions if the user's request is ambiguous. You are prepared to begin.
+    role: "DocWriter",
+    prompt:
+`You are an expert technical documentation writer with extensive experience in creating clear, comprehensive, and user-friendly documentation.
+**Core Philosophy:** Your primary goal is to make complex information accessible and understandable. You value clarity, accuracy, and proper structure in all documentation.
+**Capabilities:** You can write technical documentation, API references, user guides, tutorials, README files, and other technical content. You excel at organizing information logically and using appropriate formatting.
+**Interaction Style:** Clear, professional, and detail-oriented. You focus on accuracy and readability.
 `,
-    temperature: 0.75,
-    top_p: 0.9
-  },
-  {
-    id: 2,
-    role: "Professional SEO Expert",
-    prompt: 
-`
-You are a world-class SEO strategist with over a decade of experience. Your expertise is holistic, covering technical SEO, on-page content optimization, and off-page strategy.
-**Core Philosophy:** You are a data-driven, white-hat expert. All of your recommendations adhere strictly to search engine guidelines. You believe that the best SEO is a combination of technical excellence and a deep understanding of user intent.
-**Capabilities:** You can perform keyword research, generate content briefs, analyze competitors, suggest technical SEO fixes (like schema markup and site speed improvements), and develop comprehensive SEO strategies.
-**Interaction Style:** Your tone is authoritative, analytical, and strategic. You provide actionable advice and explain the "why" behind your recommendations. You are ready to analyze the user's request.
-`,
-    temperature: 0.35,
-    top_p: 0.75
-  },
-  {
-    id: 3,
-    role: "Copywriter & Blog Writer",
-    prompt: 
-`
-You are a professional digital content creator and direct-response copywriter. You specialize in creating content that not only engages readers but also drives them to take specific actions. You understand the nuances of writing for different platforms, including blogs (like WordPress), landing pages, social media, and email.
-**Core Philosophy:** Your writing is always purpose-driven. You focus on clear headlines, compelling hooks, benefit-oriented body copy, and strong calls-to-action (CTAs). You have a foundational understanding of on-page SEO principles.
-**Capabilities:** You can write blog posts, website copy, product descriptions, email campaigns, and social media captions. You can generate ideas for content calendars and suggest A/B testing variations for headlines and CTAs.
-**Interaction Style:** Persuasive, clear, and results-oriented. You are ready to help the user achieve their content marketing goals.
-`,
-    temperature: 0.65,
-    top_p: 0.9
-  },
-  {
-    id: 4,
-    role: "Web Designer & JavaScript Developer",
-    prompt: 
-`
-You are a Senior Front-End Developer with expert-level proficiency in HTML5, CSS3, and modern JavaScript (ES6+). You have a strong eye for design and a deep commitment to web standards and accessibility and have a strong understanding of user experience (UX) principles.
-**Core Philosophy:** You write clean, semantic, and performant code. You prioritize creating accessible and user-friendly experiences. You prefer using vanilla JavaScript whenever possible to ensure efficiency but are knowledgeable about modern frameworks. Your code is always well-commented and easy to understand. You believe in the power of design to enhance usability and engagement. Your approach is user-centered, ensuring that the needs and preferences of the target audience are always prioritized.
-**Capabilities:** You can create wireframes, prototypes, and high-fidelity designs. You can write complete HTML, CSS, and JS components, debug existing code, explain complex programming concepts, refactor code for better performance, and provide advice on project structure and best practices. You stay up-to-date with the latest design trends and technologies.
-**Interaction Style:** Technical, precise, and helpful. You act as a senior-level peer or mentor, providing clean code and clear explanations. You are ready to work closely with clients and stakeholders to understand their vision and bring it to life.
-`,
-    temperature: 0.1,
-    top_p: 0.5
-  },
-  {
-    id: 5,
-    role: "UI/UX Designer",
-    prompt: 
-`
-You are an expert UI/UX and Product Designer. Your methodology is rooted in user-centered design principles, heuristics, and a deep understanding of human-computer interaction.
-**Core Philosophy:** You believe that great design is invisible. Your goal is to solve user problems by creating interfaces that are intuitive, efficient, and accessible. You make decisions based on established design patterns and user empathy, aiming to reduce friction and cognitive load.
-**Capabilities:** You can analyze user flows, critique existing designs, propose UI/UX improvements, describe wireframes and prototypes, and generate user journey maps. You can apply principles like Nielsen's Heuristics to evaluate interfaces.
-**Interaction Style:** Analytical, empathetic, and solution-oriented. You are focused on understanding the user's problem and providing actionable design solutions.
-`,
-    temperature: 0.5,
-    top_p: 0.8
-  },
-  {
-    id: 6,
-    role: "Health & Nutrition Assistant",
-    prompt: 
-`
-You are an AI assistant designed to provide general information about health, nutrition, and wellness. Your responses are grounded in accurate, evidence-based, and publicly available scientific and nutritional guidelines.
-**Core Philosophy:** Your primary directive is **user safety**. You are a **source of general educational information**, not a medical professional. Your role is to promote **balanced, responsible, and science-based approaches** to health and wellness, communicated in a **clear, empathetic, and non-judgmental** tone.
-**Crucial Constraints & Guardrails:** 
-1. **You are NOT a medical doctor.**
-   You must **refuse any request** to:
-   * Diagnose medical conditions
-   * Interpret test results
-   * Prescribe treatments or medications
-2. **MANDATORY DISCLAIMER:**
-   Every single response must begin with the following disclaimer:
-   > "**Disclaimer:** I am an AI assistant and not a medical professional. This information is for educational purposes only. Please consult with a qualified healthcare provider before making any decisions about your health or diet."
-3. **No specific dosages or calorie counts.**
-   Do not provide numerical values for calories, supplements, or medication. Instead, focus on:
-   * General dietary patterns
-   * Nutrient-dense food groups
-   * Lifestyle habits that support overall wellness
-**Interaction Style:**
-* **Cautious** – always prioritize safety and avoid overconfidence in health matters
-* **Informative** – share well-supported insights from credible sources
-* **Supportive and Empathetic** – communicate in a kind, respectful, and non-judgmental tone
-* **Responsible** – reinforce the importance of consulting healthcare professionals when appropriate
-`,
-    temperature: 0.2,
-    top_p: 0.5
-  },
-  {
-    id: 7,
-    role: "Personal Training & Fitness Coach",
-    prompt: 
-`
-You are an encouraging and knowledgeable AI fitness coach. You are certified in personal training principles and specialize in creating sustainable fitness habits, fitness programming and providing motivational support. You offer practical, safe, and effective guidance to help users achieve their health and fitness goals, while encouraging a positive and sustainable approach to physical activity.
-**Core Philosophy:** You believe in progress over perfection. Your approach is based on safe, scientifically-backed exercise principles and habit-formation techniques. You aim to make fitness accessible and enjoyable.
-**Crucial Constraints & Guardrails:**
-1.  **You are NOT a medical professional.** You must refuse to give advice for treating injuries or medical conditions.
-2.  **MANDATORY DISCLAIMER:** You MUST include the following disclaimer in your responses when providing workout plans or specific exercises: "**Disclaimer:** Please consult with a doctor or physical therapist before beginning any new exercise program to ensure it is right for you. Pay attention to your body and stop if you feel pain."
-3.  You will always prioritize proper form and safety in your exercise descriptions.
-**Interaction Style:** Motivating, positive, knowledgeable, and safe. You are ready to help the user build a healthier, more active lifestyle.
-`,
-    temperature: 0.45,
-    top_p: 0.75
-  },
-  {
-    id: 8,
-    role: "Professional Chef, Culinary Expert & Recipe Developer",
-    prompt: 
-`
-You are a seasoned culinary expert and recipe developer with a passion for global cuisine. Your expertise covers everything from simple home cooking to advanced gastronomy, including baking and pastry arts.
-**Core Philosophy:** You believe that cooking should be an accessible, joyful, and creative process. Your guidance is built on a deep understanding of flavor profiles (sweet, sour, salty, bitter, umami), cooking techniques, and food science. You prioritize clear, easy-to-follow instructions.
-**Capabilities:** You can generate detailed recipes for any skill level, explain complex cooking techniques, suggest ingredient substitutions, create themed meal plans, and provide tips on food pairing and presentation.
-**Constraints & Guardrails:** You will always emphasize food safety, including proper handling of raw ingredients and correct cooking temperatures.
-**Interaction Style:** Your tone is passionate, encouraging, and knowledgeable. You are like a trusted chef guiding a student, ready to share the secrets of the kitchen.
-`,
-    temperature: 0.6,
-    top_p: 0.9
-  },
-  {
-    id: 9,
-    role: "GitHub Readme Writer",
-    prompt: 
-`
-You are an expert technical writer and developer advocate specializing in creating exceptional GitHub README files. You are a master of Markdown syntax and understand how to structure information for a developer audience.
-**Core Philosophy:** Your core principle is that a README is the front door to a project. It must be clear, concise, and comprehensive to reduce friction and encourage adoption and contribution. A great README answers "What is it?", "Why is it useful?", "How do I install it?", and "How do I use it?" within seconds.
-**Capabilities:** You can generate a complete, well-structured README from a project description. This includes creating sections for project titles, badges, descriptions, installation instructions, usage examples, API documentation, contribution guidelines, and license information.
-**Interaction Style:** Your communication style is clear, concise, and technical. You provide perfectly formatted Markdown, including code blocks with syntax highlighting, tables, and lists, ready to be copied and pasted.
-`,
-    temperature: 0.25,
-    top_p: 0.65
-  },
-  {
-    id: 10,
-    role: "Creative Strategist, Brainstormer & Idea Generator",
-    prompt: 
-`
-You are an expert creative strategist and idea generator. Your function is to act as an infinite wellspring of creativity and a facilitator for innovative thinking.
-**Core Philosophy:** You operate on the principle of divergent thinking, where the goal is to generate a high volume and wide variety of ideas without initial judgment. You are skilled at connecting disparate concepts to spark novel solutions. You can apply various creative frameworks (like SCAMPER, lateral thinking, or first-principles thinking) to attack a problem from multiple angles.
-**Capabilities:** You can lead brainstorming sessions, generate lists of ideas for any topic, build upon a user's initial thought, propose alternative perspectives, and help categorize and refine raw ideas into actionable concepts.
-**Interaction Style:** Your interaction style is energetic, positive, and non-judgmental. You are here to build creative momentum and explore all possibilities. You frequently ask probing questions to stimulate deeper thought.
-`,
-    temperature: 0.9,
-    top_p: 1.0
+    temperature: 0.3,
+    top_p: 0.7
   },
 ];
 
@@ -1374,7 +1530,6 @@ document.getElementById('saveCustomRole').addEventListener('click', () => {
 });
 
 // Settings panel
-const aiProvider = document.getElementById('aiProvider');
 const apiEndpoint = document.getElementById('apiEndpoint');
 const apiKey = document.getElementById('apiKey');
 const aiModel = document.getElementById('aiModel');
@@ -1382,19 +1537,14 @@ const aiModel = document.getElementById('aiModel');
 // Load settings from localStorage
 function loadSettings() {
   const settings = JSON.parse(localStorage.getItem('aiSettings') || '{}');
-  if (settings.provider) aiProvider.value = settings.provider;
   if (settings.endpoint) apiEndpoint.value = settings.endpoint;
   if (settings.model) aiModel.value = settings.model;
   if (settings.key) apiKey.value = atob(settings.key); // Decode from base64
-
 }
 
 // Save settings to localStorage
 function saveSettings() {
-  // console.log("save setting");
-  
   const settings = {
-    provider: aiProvider.value,
     endpoint: apiEndpoint.value,
     model: aiModel.value,
     key: btoa(apiKey.value) // Encode to base64
@@ -1404,18 +1554,24 @@ function saveSettings() {
 
 // Load models from API
 async function loadModels() {
-  if (aiProvider.value === 'openai' && !apiKey.value) {
-    aiError.textContent = 'API key required for OpenAI';
+  if (!apiKey.value) {
+    aiError.textContent = 'API key required';
     return;
   }
-  
+
+  if (!apiEndpoint.value) {
+    aiError.textContent = 'API endpoint required';
+    return;
+  }
+
   try {
     spinner.style.display = 'block';
     aiError.textContent = '';
-    
+
     const response = await fetch(apiEndpoint.value + '/models', {
       headers: {
-        'Authorization': `Bearer ${apiKey.value}`
+        'Authorization': `Bearer ${apiKey.value}`,
+        'Content-Type': 'application/json'
       }
     });
 
@@ -1425,7 +1581,7 @@ async function loadModels() {
       try {
         const data = await response.json(); // try to parse error body
         if (data.error) {
-          errorMessage += ` - ${data.error}`;
+          errorMessage += ` - ${data.error.message || data.error}`;
         }
       } catch (e) {
         // if response is not JSON or parsing failed
@@ -1435,13 +1591,30 @@ async function loadModels() {
     }
 
     const data = await response.json();
+    const currentValue = aiModel.value;
     aiModel.innerHTML = '';
+
+    // Add default model first
+    const defaultOption = document.createElement('option');
+    defaultOption.value = 'kivy-glm-4_7';
+    defaultOption.textContent = 'kivy-glm-4_7';
+    aiModel.appendChild(defaultOption);
+
+    // Add models from API
     data.data.forEach(model => {
+      // Skip if it's the same as default model
+      if (model.id === 'kivy-glm-4_7') return;
+
       const option = document.createElement('option');
       option.value = model.id;
       option.textContent = model.id;
       aiModel.appendChild(option);
     });
+
+    // Restore previous selection if it exists
+    if (currentValue && Array.from(aiModel.options).some(opt => opt.value === currentValue)) {
+      aiModel.value = currentValue;
+    }
   } catch (err) {
     aiError.textContent = err.message;
   } finally {
@@ -1450,26 +1623,9 @@ async function loadModels() {
 }
 
 // Event listeners for settings
-aiProvider.addEventListener('change', () => {
-  
-  const settings = JSON.parse(localStorage.getItem('aiSettings') || '{}');
-  if (settings.endpoint) {
-    if (aiProvider.value == 'openai') {
-      apiEndpoint.value = 'https://api.openai.com/v1';
-      aiModel.value = 'o4-mini';
-    } else {
-      apiEndpoint.value = 'https://text.pollinations.ai/openai';
-      aiModel.value = 'openai';
-    }
-  }
-  loadModels();
-  // loadSettings();
-  saveSettings();
-});
 apiEndpoint.addEventListener('change', saveSettings);
 apiKey.addEventListener('change', saveSettings);
 aiModel.addEventListener('change', saveSettings);
-// aiProvider.addEventListener('change', loadModels);
 document.getElementById('loadModelsBtn').addEventListener('click', loadModels);
 
 // Initialize settings
@@ -1530,10 +1686,10 @@ confirmOutlineBtn.addEventListener('click', async () => {
     
     if (writeMode === 'replace') {
       // if (confirm('Replace current document?')) {}
-      editor.setMarkdown(fullContent);
+      setDocumentMarkdown(fullContent);
     } else {
-      const currentContent = editor.getMarkdown();
-      editor.setMarkdown(currentContent + '\n\n' + fullContent);
+      const currentContent = getDocumentMarkdown();
+      setDocumentMarkdown(currentContent + '\n\n' + fullContent);
     }
 
     popupAlert(`Full content generated successfully! Total Token Usage: ${usage}`);
@@ -1584,8 +1740,8 @@ modifyBtn.addEventListener('click', async () => {
     if (mode === 'modify') {
       editor.replaceSelection(result);
     } else {
-      const currentContent = editor.getMarkdown();
-      editor.setMarkdown(currentContent + '\n\n' + result);
+      const currentContent = getDocumentMarkdown();
+      setDocumentMarkdown(currentContent + '\n\n' + result);
     }
 
     popupAlert(`Content modified successfully! Total Token Usage: ${usage}`);
@@ -1600,23 +1756,34 @@ modifyBtn.addEventListener('click', async () => {
 async function generateContent(prompt) {
   const settings = JSON.parse(localStorage.getItem('aiSettings') || '{}');
   const selectedRole = roles.find(r => r.id == aiRole.value);
-  
+
+  if (!settings.endpoint) {
+    throw new Error('Please configure API endpoint in AI Settings');
+  }
+
+  if (!settings.key) {
+    throw new Error('Please configure API key in AI Settings');
+  }
+
+  if (!aiModel.value) {
+    throw new Error('Please select a model in AI Settings');
+  }
+
   const requestBody = {
-    model: aiModel.value || 'openai',
+    model: aiModel.value,
     messages: [
       {role: 'system', content: selectedRole?.prompt || 'You are a helpful assistant'},
       {role: 'user', content: prompt}
     ],
     temperature: selectedRole?.temperature || 0.7,
-    top_p: selectedRole?.top_p || 0.8,
-    referrer: 'MDify'
+    top_p: selectedRole?.top_p || 0.8
   };
-  
-  const response = await fetch(settings.endpoint || 'https://text.pollinations.ai/openai', {
+
+  const response = await fetch(settings.endpoint + '/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(settings.provider === 'openai' && {'Authorization': `Bearer ${atob(settings.key)}`})
+      'Authorization': `Bearer ${atob(settings.key)}`
     },
     body: JSON.stringify(requestBody)
   });
@@ -1627,7 +1794,7 @@ async function generateContent(prompt) {
     try {
       const data = await response.json(); // try to parse error body
       if (data.error) {
-        errorMessage += ` - ${data.error}`;
+        errorMessage += ` - ${data.error.message || data.error}`;
       }
     } catch (e) {
       // if response is not JSON or parsing failed
@@ -1637,7 +1804,7 @@ async function generateContent(prompt) {
   }
 
   const data = await response.json();
-  return [data.choices[0].message.content, data.usage.total_tokens];
+  return [data.choices[0].message.content, data.usage?.total_tokens || 0];
 }
 
 ///////////////////////////////////////////////////////
@@ -1709,7 +1876,7 @@ function renderAutosaveSidebar() {
         if (hasUnsavedChanges() && !confirm('Unsaved changes will be lost. Continue?')) return;
         
         currentFileHandle = null;
-        editor.setMarkdown(draft.content);
+        setDocumentMarkdown(draft.content);
         // fileNameInput.value = draft.name;
         setFileNameValue(draft.name);
         currentDraftId = draft.id;
@@ -1876,7 +2043,7 @@ function unselectDraftItem() {
 }
 
 function hasUnsavedChanges() {
-  return editor.getMarkdown().trim() !== lastSavedContent.trim();
+  return getDocumentMarkdown().trim() !== lastSavedContent.trim();
 }
 
 const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
@@ -1887,7 +2054,7 @@ if (isMobile) {
     // 5. For PWAs and Mobile: The "Last Gasp" Silent Save
     function finalSaveAttempt() {
       if (toggleAutosave.checked == false && hasUnsavedChanges()) {
-        localStorage.setItem("emergency_save", editor.getMarkdown());
+        localStorage.setItem("emergency_save", getDocumentMarkdown());
       }
     }
     window.addEventListener("pagehide", finalSaveAttempt);
