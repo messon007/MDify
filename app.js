@@ -249,6 +249,13 @@ const autoSaveOnChangeFunc = debounce(() => {
   autoSaveFunc();
 }, 2000); // Wait 3 second after user stops typing
 
+const updateOutlineOnChange = debounce(() => {
+  const sidebar = document.getElementById('outlineSidebar');
+  if (sidebar && sidebar.classList.contains('open')) {
+    renderOutlineSidebar();
+  }
+}, 500);
+
 
 // Alert timeout
 let alertTimeout;
@@ -299,6 +306,7 @@ const editor = new Editor({
         }
 
         autoSaveOnChangeFunc();
+        updateOutlineOnChange();
       },
     //   focus: () => {
     //     document.body.classList.add('editor-focused');
@@ -341,6 +349,7 @@ const updateLargeDocumentPreview = debounce(() => {
 
 largeDocumentTextarea.addEventListener('input', () => {
   autoSaveOnChangeFunc();
+  updateOutlineOnChange();
   updateLargeDocumentPreview();
 });
 largeDocumentTextarea.addEventListener('keyup', updateLargeDocumentPreview);
@@ -1811,6 +1820,117 @@ async function generateContent(prompt) {
 /////////////////////////////////////////////////////// End of AI Codes
 ///////////////////////////////////////////////////////
 
+// Document Outline Sidebar
+const outlineSidebar = document.getElementById('outlineSidebar');
+const outlineSidebarOverlay = document.getElementById('outlineSidebarOverlay');
+const openOutlineSidebarBtn = document.getElementById('openOutlineSidebarBtn');
+const closeOutlineSidebar = document.getElementById('closeOutlineSidebar');
+const outlineList = document.getElementById('outlineList');
+
+function extractMarkdownHeadings(markdown) {
+  const headings = [];
+  const lines = markdown.split('\n');
+  let inCodeBlock = false;
+
+  lines.forEach((line, index) => {
+    if (line.startsWith('```') || line.startsWith('~~~')) {
+      inCodeBlock = !inCodeBlock;
+      return;
+    }
+    if (inCodeBlock) return;
+
+    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    if (!match) return;
+
+    headings.push({
+      level: match[1].length,
+      text: match[2].trim(),
+      line: index
+    });
+  });
+
+  return headings;
+}
+
+function renderOutlineSidebar() {
+  const headings = extractMarkdownHeadings(getDocumentMarkdown());
+  outlineList.innerHTML = '';
+
+  if (!headings.length) {
+    outlineList.innerHTML = '<div class="outline-empty">No headings found.</div>';
+    return;
+  }
+
+  headings.forEach((heading, index) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'outline-item';
+    item.style.paddingLeft = `${10 + (heading.level - 1) * 14}px`;
+    item.textContent = heading.text;
+    item.title = heading.text;
+    item.addEventListener('click', () => {
+      jumpToHeading(heading, index);
+      closeOutline();
+    });
+    outlineList.appendChild(item);
+  });
+}
+
+function closeOutline() {
+  outlineSidebar.classList.remove('open');
+  outlineSidebarOverlay.style.display = 'none';
+}
+
+function jumpToHeading(heading, index) {
+  if (largeDocumentMode) {
+    jumpLargeDocumentTextareaToLine(heading.line);
+  } else {
+    jumpToastEditorToHeading(heading, index);
+  }
+}
+
+function jumpLargeDocumentTextareaToLine(lineNumber) {
+  const lines = largeDocumentTextarea.value.split('\n');
+  let offset = 0;
+  for (let i = 0; i < lineNumber; i++) {
+    offset += lines[i].length + 1;
+  }
+
+  largeDocumentTextarea.focus();
+  largeDocumentTextarea.setSelectionRange(offset, offset);
+
+  const lineHeight = parseFloat(getComputedStyle(largeDocumentTextarea).lineHeight) || 22;
+  largeDocumentTextarea.scrollTop = Math.max(0, lineNumber * lineHeight - largeDocumentTextarea.clientHeight * 0.2);
+  updateLargeDocumentPreview();
+}
+
+function jumpToastEditorToHeading(heading, index) {
+  const markdown = getDocumentMarkdown();
+  const headings = extractMarkdownHeadings(markdown);
+  const target = headings[index];
+  if (!target) return;
+
+  editor.focus();
+  editor.setSelection([target.line + 1, 1], [target.line + 1, 1]);
+
+  const editorScroll = document.querySelector('.toastui-editor-md-container .toastui-editor-md-editor, .toastui-editor-md-container .toastui-editor-md-preview, .toastui-editor-contents');
+  if (editorScroll && 'scrollTop' in editorScroll) {
+    const lineHeight = 22;
+    editorScroll.scrollTop = Math.max(0, target.line * lineHeight - editorScroll.clientHeight * 0.2);
+  }
+}
+
+openOutlineSidebarBtn.addEventListener('click', () => {
+  renderOutlineSidebar();
+  document.getElementById('autosaveSidebar').classList.remove('open');
+  document.getElementById('autosaveSidebarOverlay').style.display = 'none';
+  outlineSidebar.classList.add('open');
+  outlineSidebarOverlay.style.display = 'block';
+});
+
+closeOutlineSidebar.addEventListener('click', closeOutline);
+outlineSidebarOverlay.addEventListener('click', closeOutline);
+
 // Autosave Sidebar
 const autosaveSidebar = document.getElementById('autosaveSidebar');
 const autosaveSidebarOverlay = document.getElementById('autosaveSidebarOverlay');
@@ -1825,6 +1945,7 @@ const exportZipBtn = document.getElementById('exportZip');
 // Toggle sidebar
 openAutosaveSidebarBtn.addEventListener('click', () => {
   renderAutosaveSidebar();
+  closeOutline();
   autosaveSidebar.classList.add('open');
   autosaveSidebarOverlay.style.display = 'block';
 });
