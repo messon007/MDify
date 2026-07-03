@@ -154,6 +154,11 @@ input {
     flex: none;
 }
 
+.outline-toggle.active {
+    background: var(--primary-color);
+    color: #fff;
+}
+
 .toolbar .toolbar-bottom .outline-toggle svg {
     margin: 0;
 }
@@ -232,28 +237,135 @@ input {
     color: var(--text-color);
 } */
 
-.preview-pane table {
+.preview-pane table,
+.compare-render table {
     width: 100%;
     border-collapse: collapse;
     margin: 0.75rem 0;
 }
 
 .preview-pane th,
-.preview-pane td {
+.preview-pane td,
+.compare-render th,
+.compare-render td {
     border: 1px solid var(--border-color);
     padding: 0.35rem 0.5rem;
     vertical-align: top;
 }
 
-.preview-pane pre {
+.preview-pane pre,
+.compare-render pre {
     overflow: auto;
     padding: 0.75rem;
     background: var(--hover-bg);
     border-radius: 4px;
 }
 
-.preview-pane code {
+.preview-pane code,
+.compare-render code {
     font-family: var(--font-code);
+}
+
+.compare-container {
+    display: none;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+.compare-container.active {
+    display: flex;
+}
+
+.compare-pane {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-color);
+}
+
+.compare-pane:last-child {
+    border-right: 0;
+}
+
+.compare-pane-header {
+    height: 38px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--toolbar-bottom-bg);
+}
+
+.compare-pane-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.compare-pane-actions {
+    display: flex;
+    gap: 4px;
+    flex: none;
+}
+
+.compare-pane-actions button {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+}
+
+.compare-pane-actions button.active {
+    background: var(--primary-color);
+    color: #fff;
+}
+
+.compare-source,
+.compare-render {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.compare-source {
+    width: 100%;
+    border: 0;
+    resize: none;
+    padding: 16px;
+    outline: none;
+    background: var(--bg-color);
+    color: var(--text-color);
+    font: 14px/1.6 var(--font-code);
+}
+
+.compare-render {
+    display: none;
+    padding: 16px;
+    font-family: var(--font-body);
+    line-height: 1.6;
+    color: var(--text-color);
+}
+
+.compare-pane.render-mode .compare-source {
+    display: none;
+}
+
+.compare-pane.render-mode .compare-render {
+    display: block;
+}
+
+.compare-target-empty {
+    padding: 16px;
+    color: var(--text-color-note);
+    font-size: 13px;
 }
 
 button,

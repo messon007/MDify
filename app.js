@@ -331,20 +331,68 @@ const editor = new Editor({
 });
 
 let largeDocumentMode = false;
+let compareMode = false;
 const largeDocumentTextarea = document.createElement('textarea');
 const largeDocumentPreview = document.getElementById('preview');
+const editorContainer = document.querySelector('.editor-container');
 largeDocumentTextarea.id = 'largeDocumentEditor';
 largeDocumentTextarea.setAttribute('aria-label', 'Large markdown editor');
 largeDocumentTextarea.spellcheck = false;
 largeDocumentTextarea.style.cssText = 'display:none;width:50%;height:100%;box-sizing:border-box;border:0;border-right:1px solid var(--border-color);resize:none;padding:16px;font:14px/1.6 monospace;background:var(--bg-color);color:var(--text-color);outline:none;order:1;';
 largeDocumentPreview.style.cssText = 'display:none;width:50%;height:100%;box-sizing:border-box;overflow:auto;padding:16px;background:var(--bg-color);color:var(--text-color);font-family:var(--font-body);line-height:1.6;';
 largeDocumentPreview.style.order = '2';
-document.querySelector('.editor-container').insertBefore(largeDocumentTextarea, largeDocumentPreview);
+editorContainer.insertBefore(largeDocumentTextarea, largeDocumentPreview);
+
+const compareContainer = document.createElement('div');
+compareContainer.id = 'compareContainer';
+compareContainer.className = 'compare-container';
+compareContainer.innerHTML = `
+  <section class="compare-pane" data-side="source">
+    <div class="compare-pane-header">
+      <div class="compare-pane-title" id="compareSourceTitle">Source</div>
+      <div class="compare-pane-actions">
+        <button type="button" data-open-side="source">Open</button>
+        <button type="button" data-render-toggle="source">Render</button>
+      </div>
+    </div>
+    <textarea id="compareSourceText" class="compare-source" readonly></textarea>
+    <div id="compareSourceRender" class="compare-render"></div>
+  </section>
+  <section class="compare-pane" data-side="target">
+    <div class="compare-pane-header">
+      <div class="compare-pane-title" id="compareTargetTitle">Target</div>
+      <div class="compare-pane-actions">
+        <button type="button" data-open-side="target">Open</button>
+        <button type="button" data-render-toggle="target">Render</button>
+      </div>
+    </div>
+    <textarea id="compareTargetText" class="compare-source" readonly></textarea>
+    <div id="compareTargetRender" class="compare-render"></div>
+  </section>
+  <input type="file" id="compareFileInput" accept=".md,.txt" hidden>
+`;
+editorContainer.appendChild(compareContainer);
+
+const compareModeBtn = document.getElementById('compareModeBtn');
+const compareSourceTitle = document.getElementById('compareSourceTitle');
+const compareTargetTitle = document.getElementById('compareTargetTitle');
+const compareSourceText = document.getElementById('compareSourceText');
+const compareTargetText = document.getElementById('compareTargetText');
+const compareSourceRender = document.getElementById('compareSourceRender');
+const compareTargetRender = document.getElementById('compareTargetRender');
+const compareFileInput = document.getElementById('compareFileInput');
+let compareTargetName = 'Target';
+let compareFileInputSide = 'target';
+const markdownViewers = {
+  large: null,
+  source: null,
+  target: null
+};
 
 const updateLargeDocumentPreview = debounce(() => {
   if (!largeDocumentMode) return;
   const content = getLargeDocumentPreviewSlice();
-  largeDocumentPreview.innerHTML = lightweightMarkdownToHtml(content);
+  renderMarkdownWithToastViewer('large', content, largeDocumentPreview);
 }, 250);
 
 largeDocumentTextarea.addEventListener('input', () => {
@@ -363,17 +411,25 @@ function shouldUseLargeDocumentMode(content) {
 
 function setLargeDocumentMode(enabled) {
   largeDocumentMode = enabled;
-  document.getElementById('editor').style.display = enabled ? 'none' : '';
-  largeDocumentTextarea.style.display = enabled ? 'block' : 'none';
-  largeDocumentPreview.style.display = enabled ? 'block' : 'none';
-  document.getElementById('footerButtons').style.display = enabled ? 'none' : '';
+  if (!compareMode) {
+    document.getElementById('editor').style.display = enabled ? 'none' : '';
+    largeDocumentTextarea.style.display = enabled ? 'block' : 'none';
+    largeDocumentPreview.style.display = enabled ? 'block' : 'none';
+    document.getElementById('footerButtons').style.display = enabled ? 'none' : '';
+  }
 }
 
 function getDocumentMarkdown() {
+  if (compareMode) {
+    return compareSourceText.value;
+  }
   return largeDocumentMode ? largeDocumentTextarea.value : editor.getMarkdown();
 }
 
 function setDocumentMarkdown(content, options = {}) {
+  if (compareMode) {
+    setCompareMode(false);
+  }
   if (options.forceLarge || shouldUseLargeDocumentMode(content)) {
     setLargeDocumentMode(true);
     largeDocumentTextarea.value = content;
@@ -390,9 +446,156 @@ function getDocumentHTML() {
   return largeDocumentMode ? lightweightMarkdownToHtml(getDocumentMarkdown()) : editor.getHTML();
 }
 
+function setCompareMode(enabled) {
+  const sourceMarkdown = enabled ? getDocumentMarkdown() : '';
+  compareMode = enabled;
+  compareContainer.classList.toggle('active', enabled);
+  compareModeBtn.classList.toggle('active', enabled);
+  compareModeBtn.querySelector('span').textContent = 'Compare';
+
+  if (enabled) {
+    compareSourceText.value = sourceMarkdown;
+    compareSourceTitle.textContent = fileNameInput.value || 'Source';
+    renderComparePane('source');
+
+    document.getElementById('editor').style.display = 'none';
+    largeDocumentTextarea.style.display = 'none';
+    largeDocumentPreview.style.display = 'none';
+    document.getElementById('footerButtons').style.display = 'none';
+  } else {
+    destroyMarkdownViewer('source');
+    destroyMarkdownViewer('target');
+    compareContainer.classList.remove('active');
+    document.getElementById('editor').style.display = largeDocumentMode ? 'none' : '';
+    largeDocumentTextarea.style.display = largeDocumentMode ? 'block' : 'none';
+    largeDocumentPreview.style.display = largeDocumentMode ? 'block' : 'none';
+    document.getElementById('footerButtons').style.display = largeDocumentMode ? 'none' : '';
+  }
+}
+
+function renderComparePane(side) {
+  const textElement = side === 'source' ? compareSourceText : compareTargetText;
+  const renderElement = side === 'source' ? compareSourceRender : compareTargetRender;
+  if (!textElement.value.trim() && side === 'target') {
+    destroyMarkdownViewer(side);
+    renderElement.innerHTML = '<div class="compare-target-empty">Open a target Markdown file to compare.</div>';
+  } else {
+    renderCompareMarkdown(side, textElement.value, renderElement);
+  }
+}
+
+function destroyMarkdownViewer(key) {
+  if (markdownViewers[key]) {
+    markdownViewers[key].destroy();
+    markdownViewers[key] = null;
+  }
+}
+
+function renderCompareMarkdown(side, markdown, renderElement) {
+  const textElement = side === 'source' ? compareSourceText : compareTargetText;
+  const isLarge = shouldUseLargeDocumentMode(markdown);
+  const content = isLarge
+    ? getMarkdownSlice(markdown, textElement.selectionStart || 0)
+    : markdown;
+  renderMarkdownWithToastViewer(side, content, renderElement);
+  if (isLarge) {
+    const note = document.createElement('div');
+    note.className = 'compare-target-empty';
+    note.textContent = 'Large file: rendered section preview';
+    renderElement.prepend(note);
+  }
+}
+
+function renderMarkdownWithToastViewer(key, markdown, renderElement) {
+  destroyMarkdownViewer(key);
+  renderElement.innerHTML = '';
+
+  try {
+    const viewerOptions = {
+      el: renderElement,
+      viewer: true,
+      initialValue: markdown,
+      usageStatistics: false,
+      theme: localStorage.getItem('selectedTheme') === 'dark' ? 'dark' : 'light',
+      plugins: [
+        [chart, chartOptions],
+        [codeSyntaxHighlight, { highlighter: Prism}],
+        colorSyntax,
+        tableMergedCell,
+        uml
+      ]
+    };
+
+    markdownViewers[key] = Editor.factory
+      ? Editor.factory(viewerOptions)
+      : new Editor(viewerOptions);
+  } catch (err) {
+    console.error(err);
+    renderElement.innerHTML = lightweightMarkdownToHtml(markdown);
+  }
+}
+
+function setComparePaneMode(side, mode) {
+  const pane = compareContainer.querySelector(`.compare-pane[data-side="${side}"]`);
+  pane.classList.toggle('render-mode', mode === 'render');
+  const renderButton = pane.querySelector('[data-render-toggle]');
+  renderButton.classList.toggle('active', mode === 'render');
+  if (mode === 'render') {
+    renderComparePane(side);
+  }
+}
+
+function toggleComparePaneRender(side) {
+  const pane = compareContainer.querySelector(`.compare-pane[data-side="${side}"]`);
+  setComparePaneMode(side, pane.classList.contains('render-mode') ? 'source' : 'render');
+}
+
+compareModeBtn.addEventListener('click', () => {
+  setCompareMode(!compareMode);
+});
+
+compareContainer.querySelectorAll('[data-render-toggle]').forEach(button => {
+  button.addEventListener('click', () => {
+    toggleComparePaneRender(button.dataset.renderToggle);
+  });
+});
+
+compareContainer.querySelectorAll('[data-open-side]').forEach(button => {
+  button.addEventListener('click', () => {
+    compareFileInputSide = button.dataset.openSide;
+    compareFileInput.click();
+  });
+});
+
+compareFileInput.addEventListener('change', async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  try {
+    const content = await file.text();
+    if (compareFileInputSide === 'source') {
+      compareSourceText.value = content;
+      compareSourceTitle.textContent = file.name;
+      renderComparePane('source');
+    } else {
+      compareTargetText.value = content;
+      compareTargetName = file.name;
+      compareTargetTitle.textContent = compareTargetName;
+      renderComparePane('target');
+    }
+    event.target.value = '';
+  } catch (err) {
+    showAlert(`Failed to open compare file: ${err.message}`);
+  }
+});
+
 function getLargeDocumentPreviewSlice() {
   const content = largeDocumentTextarea.value;
   const cursor = largeDocumentTextarea.selectionStart || 0;
+  return getMarkdownSlice(content, cursor);
+}
+
+function getMarkdownSlice(content, cursor = 0) {
   const beforeCursor = content.slice(0, cursor);
   const cursorLine = beforeCursor.split('\n').length - 1;
   const lines = content.split('\n');
